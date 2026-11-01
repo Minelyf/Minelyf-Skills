@@ -1,29 +1,77 @@
 # Minelyf Skills
 
-可复用的 Codex skills：把日常工作方法整理成可安装、可分享的工具。
+持续积累、可独立安装的 Codex Skills 合集。这里会收录画图、文档与其他工作场景中的可复用能力，每个 skill 都放在 `skills/` 下独立维护。
 
-## 飞书灵绘 · feishu-linghui
+## Skills 目录
 
-在飞书文档中创建或修改**原生可编辑画板**，适合数据信息图、流程、现状总结和规划。支持局部改字，并提供保留文档评论的操作指引。
+| 类别 | Skill | 能做什么 | 交付物 | 飞书账号 |
+|---|---|---|---|---|
+| 视觉表达 | [灵绘出图 · image-linghui](skills/image-linghui/SKILL.md) | 信息图、海报、文档总结图、架构图、流程图，支持参考图重绘和换风格 | 本地 PNG + SVG 源文件 | 不需要 |
+| 视觉表达 | [飞书灵绘 · feishu-linghui](skills/feishu-linghui/SKILL.md) | 飞书原生画板、局部改字、加行，以及保留文档评论的操作指引 | 飞书文档内可编辑画板 + 预览图 | 需要登录及编辑权限 |
 
-### 安装
+两种画图方式各有 36 套配色与版式，按最终交付需求选择。后续新增能力直接加入目录，无需另建仓库。
 
-将本仓库的 `skills/feishu-linghui` 文件夹复制到你的 Codex skills 目录（默认 `~/.codex/skills/`）。不要同时启用功能相同的旧版 `feishu-board`，以免重复匹配。
+## 画图怎么选
 
-### 使用
+**直接出图：** 适合下载、发消息、插入报告或做海报。使用「灵绘出图」，不需要飞书账号。默认用 SVG 精确排版，再渲染成 PNG；具体渲染器由运行环境提供。
 
-在 Codex 中输入：
+> 使用 $image-linghui，把这段内容做成一张清晰的信息图，交付 PNG 和 SVG。
 
-> 使用 $feishu-linghui，把这段报告整理成飞书文档中的可编辑画板。
+**结合飞书：** 适合在飞书文档里继续编辑文字、卡片和连线。使用「飞书灵绘」，需要已登录的 `lark-cli` 及目标文档的访问与编辑权限。
 
-也可以要求修改已有画板中的文字或增加一行。提供目标文档或画板及授权使用的资料。
+> 使用 $feishu-linghui，把这段内容整理到飞书文档中，生成可编辑画板。
 
-### 环境与示例
+> 使用 $feishu-linghui，把已有画板里的这段文字改掉，保留原来的布局。
 
-需要 Python 3、Node.js/npx，以及已登录并有目标文档编辑权限的 `lark-cli`。生成本地 SVG 不需要飞书账号；写入飞书需要登录和权限。转换工具会由 npx 按脚本中指定的版本范围下载。
+## 安装
 
-在临时工作目录中运行 skill 的 `examples/data_brief.py`，即可生成 `diagram.svg`；再运行 `scripts/board.py render diagram.svg` 进行渲染和排版检查。示例的所有名称和数字均为虚构数据。
+先克隆仓库：
 
-### 隐私
+```bash
+git clone https://github.com/Minelyf/Minelyf-Skills.git
+cd Minelyf-Skills
+mkdir -p ~/.codex/skills
+```
 
-仓库仅保存通用指引、脚本和虚构示例。请勿提交登录凭据、画板 token、内部文档链接、真实业务数据和导出文件。飞书访问凭据由本机 CLI 管理。
+按需安装其中一个或两个：
+
+```bash
+cp -R skills/image-linghui ~/.codex/skills/
+cp -R skills/feishu-linghui ~/.codex/skills/
+```
+
+如果自定义了 `CODEX_HOME`，请复制到该目录的 `skills/` 下。已有同名目录时先备份再更新。旧版 `feishu-board`、`beautiful-image-diagram`、`beautiful-feishu-whiteboard` 与这里的能力重叠，建议只启用所选版本，避免重复匹配。
+
+- 灵绘出图：需要可用的 SVG → PNG 渲染工具（例如 CairoSVG、resvg 或浏览器），以及中文字体；Python 示例需要 Python 3。
+- 飞书灵绘：需要 Python 3、Node.js/npx 和已登录的 `lark-cli`；SVG 转换工具由 npx 按脚本指定的版本范围下载。
+- 安装本身不配置账号或导入凭据；飞书登录由使用者在本机完成。
+
+## 风格预览
+
+两种模式使用相同的 36 套风格资源。下方展示其中三套；完整索引见 [出图风格目录](skills/image-linghui/CATALOG.md) 和 [飞书风格目录](skills/feishu-linghui/CATALOG.md)。
+
+| Insight Brief | Avocado Press | Riptide Cobalt |
+|---|---|---|
+| ![Insight Brief](skills/image-linghui/assets/styles/insight-brief.png) | ![Avocado Press](skills/image-linghui/assets/styles/avocado-press.png) | ![Riptide Cobalt](skills/image-linghui/assets/styles/riptide-cobalt.png) |
+
+预览为通用主题的风格样张，不代表真实业务数据或每次运行的固定产物。
+
+## 仓库结构与扩展
+
+```text
+Minelyf-Skills/
+├── README.md                 # 全部 skills 的目录与安装入口
+├── CONTRIBUTING.md           # 新增、维护和发布约定
+└── skills/
+    ├── image-linghui/         # 灵绘出图
+    ├── feishu-linghui/        # 飞书灵绘
+    └── <next-skill>/          # 后续独立能力
+```
+
+新增 skill 时创建独立目录，提供 `SKILL.md`，按需要添加脚本、参考资料和资源，再更新首页目录。具体约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+## 隐私与来源
+
+仓库仅收录可公开分享的指引、脚本、通用示例和风格资源。请勿提交凭据、画板 token、内部文档链接、个人路径、真实业务数据或工作导出文件。账号与登录状态由各自本机工具管理。
+
+36 套风格模板、样张及相关示例沿用原有 MIT 授权，版权为 Zara Zhang（@zarazhangrui），并经过本地使用方式适配。完整授权保留在各 skill 的 [LICENSE](skills/image-linghui/LICENSE) 中；新增资源需单独确认来源与授权。
