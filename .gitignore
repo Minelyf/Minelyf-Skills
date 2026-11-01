@@ -1,0 +1,25 @@
+# Local credentials and private configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+secrets*.json
+
+# Machine and Python artifacts
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+
+# Working documents and exports
+/output/
+/tmp/
+diagram.svg
+diagram.png
+board_export.*
+cur.json
+cur.new.json
+edits.json
