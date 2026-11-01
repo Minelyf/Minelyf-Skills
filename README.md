@@ -1,6 +1,8 @@
 # Minelyf Skills
 
-持续积累、可独立安装的 Codex Skills 合集。这里会收录画图、文档与其他工作场景中的可复用能力，每个 skill 都放在 `skills/` 下独立维护。
+把好用的方法装进工具箱，让 AI 帮你少做点重复劳动。
+
+持续积累、可独立使用的 AI Skills 合集，从画图开始，逐步扩展到文档与更多工作场景。每个 skill 都放在 `skills/` 下独立维护。
 
 ## Skills 目录
 
@@ -15,32 +17,37 @@
 
 **直接出图：** 适合下载、发消息、插入报告或做海报。使用「灵绘出图」，不需要飞书账号。默认用 SVG 精确排版，再渲染成 PNG；具体渲染器由运行环境提供。
 
-> 使用 $image-linghui，把这段内容做成一张清晰的信息图，交付 PNG 和 SVG。
+> 使用 image-linghui，把这段内容做成一张清晰的信息图，交付 PNG 和 SVG。
 
 **结合飞书：** 适合在飞书文档里继续编辑文字、卡片和连线。使用「飞书灵绘」，需要已登录的 `lark-cli` 及目标文档的访问与编辑权限。
 
-> 使用 $feishu-linghui，把这段内容整理到飞书文档中，生成可编辑画板。
+> 使用 feishu-linghui，把这段内容整理到飞书文档中，生成可编辑画板。
 
-> 使用 $feishu-linghui，把已有画板里的这段文字改掉，保留原来的布局。
+> 使用 feishu-linghui，把已有画板里的这段文字改掉，保留原来的布局。
 
 ## 安装
+
+每个 skill 都以 `SKILL.md` 为入口，附带所需脚本和资源。使用时将完整目录放入所用 AI 工具的 skills 目录，或让支持读取本地文件、执行脚本的助手读取入口；加载方式和调用语法按所用工具配置。`agents/openai.yaml` 是可选的界面元数据，核心指引在 `SKILL.md` 中。
 
 先克隆仓库：
 
 ```bash
 git clone https://github.com/Minelyf/Minelyf-Skills.git
 cd Minelyf-Skills
-mkdir -p ~/.codex/skills
 ```
 
-按需安装其中一个或两个：
+按需选择 `skills/image-linghui` 或 `skills/feishu-linghui`，也可同时使用。
+
+下面以 Codex 的默认目录为安装示例：
+
 
 ```bash
+mkdir -p ~/.codex/skills
 cp -R skills/image-linghui ~/.codex/skills/
 cp -R skills/feishu-linghui ~/.codex/skills/
 ```
 
-如果自定义了 `CODEX_HOME`，请复制到该目录的 `skills/` 下。已有同名目录时先备份再更新。旧版 `feishu-board`、`beautiful-image-diagram`、`beautiful-feishu-whiteboard` 与这里的能力重叠，建议只启用所选版本，避免重复匹配。
+Codex 用户如果自定义了 `CODEX_HOME`，请复制到该目录的 `skills/` 下；其他工具使用各自的加载目录。已有同名目录时先备份再更新。旧版 `feishu-board`、`beautiful-image-diagram`、`beautiful-feishu-whiteboard` 与这里的能力重叠，建议只启用所选版本，避免重复匹配。
 
 - 灵绘出图：需要可用的 SVG → PNG 渲染工具（例如 CairoSVG、resvg 或浏览器），以及中文字体；Python 示例需要 Python 3。
 - 飞书灵绘：需要 Python 3、Node.js/npx 和已登录的 `lark-cli`；SVG 转换工具由 npx 按脚本指定的版本范围下载。
