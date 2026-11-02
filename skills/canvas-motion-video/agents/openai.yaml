@@ -1,0 +1,4 @@
+interface:
+  display_name: "Canvas 动效短片"
+  short_description: "用 HTML Canvas 逐帧渲染产品或技术讲解短片，交付可复现的 MP4 与源文件"
+  default_prompt: "使用 $canvas-motion-video，把这段内容做成一支文字清晰、可反复改版的动效短片。"
