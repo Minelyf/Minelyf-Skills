@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>BotMux × 飞书 × AI</title>
+<style>html,body{margin:0;padding:0;background:#F7F8FC;overflow:hidden}canvas{display:block;width:1920px;height:1080px}</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script>
+'use strict';
+const W = 1920, H = 1080, SAFE = 110, TOTAL = 1200;
+const C = {
+  bg: '#F7F8FC', text: '#1F2329', sub: '#646A73', mute: '#A2A8B3',
+  blue: '#3370FF', cyan: '#00C2FF', violet: '#7B61FF', pink: '#FF6B9A', yellow: '#FFC53D',
+  white: '#FFFFFF', skel: 'rgba(31,35,41,0.08)'
+};
+const SANS = '"Noto Sans CJK SC", "PingFang SC", sans-serif';
+const MONO = '"JetBrains Mono", Menlo, monospace';
+
+// ---------- pure helpers ----------
+const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const easeOutCubic = t => 1 - Math.pow(1 - clamp(t), 3);
+const easeInCubic = t => Math.pow(clamp(t), 3);
+const easeInOut = t => { t = clamp(t); return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; };
+const fade = (f, s, d = 12) => easeOutCubic((f - s) / d);
+const out = (f, s, d = 10) => 1 - clamp((f - s) / d);
+// deterministic damped spring (gentle overshoot ~9%)
+function springT(t) { if (t <= 0) return 0; if (t >= 2) return 1; return 1 - Math.exp(-6 * t) * Math.cos(8 * t); }
+const sp = (f, s, d = 20) => springT((f - s) / d);
+const hash = n => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+function hexA(hex, a) { const n = parseInt(hex.slice(1), 16); return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`; }
+
+let TEXT_LOG = [];
+function trackOf(size, o) { if (o.mono) return '0px'; return size >= 44 ? `${(-size * 0.02).toFixed(2)}px` : '0px'; }
+function brandGrad(ctx, x0, y0, x1, y1) {
+  const g = ctx.createLinearGradient(x0, y0, x1, y1);
+  g.addColorStop(0, C.blue); g.addColorStop(0.5, C.violet); g.addColorStop(1, C.pink);
+  return g;
+}
+function lin2(ctx, x0, y0, x1, y1, a, b) { const g = ctx.createLinearGradient(x0, y0, x1, y1); g.addColorStop(0, a); g.addColorStop(1, b); return g; }
+function text(ctx, s, x, y, o) {
+  const size = o.size || 32, weight = o.weight || 400;
+  ctx.font = `${weight} ${size}px ${o.mono ? MONO : SANS}`;
+  ctx.letterSpacing = trackOf(size, o);
+  ctx.textAlign = o.align || 'left';
+  ctx.textBaseline = 'alphabetic';
+  const m = ctx.measureText(s);
+  if (o.grad) {
+    const al = o.align || 'left';
+    const xl = al === 'center' ? x - m.width / 2 : al === 'right' ? x - m.width : x;
+    ctx.fillStyle = brandGrad(ctx, xl, 0, xl + m.width, 0);
+  } else ctx.fillStyle = o.color || C.text;
+  ctx.fillText(s, x, y);
+  ctx.letterSpacing = '0px';
+  const a = ctx.globalAlpha;
+  if (a > 0.02) {
+    const t = ctx.getTransform();
+    const x0 = x - m.actualBoundingBoxLeft, x1 = x + m.actualBoundingBoxRight;
+    const y0 = y - m.actualBoundingBoxAscent, y1 = y + m.actualBoundingBoxDescent;
+    const pts = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]].map(([px, py]) => [t.a * px + t.c * py + t.e, t.b * px + t.d * py + t.f]);
+    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+    TEXT_LOG.push({ s, g: o.g || null, alpha: +a.toFixed(3), x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) });
+  }
+  return m.width;
+}
+function measure(ctx, s, o) {
+  const size = o.size || 32;
+  ctx.font = `${o.weight || 400} ${size}px ${o.mono ? MONO : SANS}`;
+  ctx.letterSpacing = trackOf(size, o);
+  const w = ctx.measureText(s).width;
+  ctx.letterSpacing = '0px';
+  return w;
+}
+function rrect(ctx, x, y, w, h, r) { const m = Math.max(0, Math.min(w / 2, h / 2)); ctx.beginPath(); ctx.roundRect(x, y, w, Math.max(0, h), Array.isArray(r) ? r.map(v => Math.min(v, m)) : Math.max(0, Math.min(r, m))); }
+function withAlpha(ctx, a, fn) { if (a <= 0.001) return; ctx.save(); ctx.globalAlpha *= Math.min(1, a); fn(); ctx.restore(); }
+function at(ctx, x, y, s, fn, rot = 0) { ctx.save(); ctx.translate(x, y); if (rot) ctx.rotate(rot); ctx.scale(s, s); ctx.translate(-x, -y); fn(); ctx.restore(); }
+
+// kinetic typography: per-segment spring rise + stagger + optional highlight sweep
+function kinetic(ctx, segs, cx, y, o, f, start, stagger, gid) {
+  const ws = segs.map(sg => measure(ctx, sg.s, o));
+  const total = ws.reduce((a, b) => a + b, 0);
+  let x = cx - total / 2;
+  segs.forEach((sg, i) => {
+    const st = start + i * stagger;
+    const p = sp(f, st, 18), a = fade(f, st, 10);
+    const xi = x, wi = ws[i];
+    withAlpha(ctx, a, () => {
+      const dy = (1 - p) * 46;
+      if (sg.hl) {
+        const hp = easeOutCubic((f - st - 10) / 18);
+        const core = sg.s.replace(/[，。、！？]+$/, '');
+        const hw = measure(ctx, core, o);
+        if (hp > 0) { ctx.save(); ctx.globalAlpha *= 0.22; ctx.fillStyle = brandGrad(ctx, xi, 0, xi + hw, 0); rrect(ctx, xi - 6, y - o.size * 0.30 + dy, (hw + 12) * hp, o.size * 0.40, 10); ctx.fill(); ctx.restore(); }
+      }
+      text(ctx, sg.s, xi, y + dy, Object.assign({}, o, { align: 'left', grad: sg.grad, g: gid }));
+    });
+    x += wi;
+  });
+}
+
+// ---------- drawing primitives ----------
+function card(ctx, x, y, w, h, r, o = {}) {
+  ctx.save();
+  ctx.shadowColor = o.shadow || 'rgba(51,112,255,0.16)'; ctx.shadowBlur = o.blur == null ? 44 : o.blur; ctx.shadowOffsetY = o.oy == null ? 18 : o.oy;
+  rrect(ctx, x, y, w, h, r); ctx.fillStyle = o.fill || 'rgba(255,255,255,0.94)'; ctx.fill();
+  ctx.restore();
+  ctx.save(); rrect(ctx, x, y, w, h, r); ctx.strokeStyle = o.stroke || 'rgba(31,35,41,0.06)'; ctx.lineWidth = 1; ctx.stroke(); ctx.restore();
+}
+function skelBar(ctx, x, y, w, h, fill) { rrect(ctx, x, y, w, h, h / 2); ctx.fillStyle = fill || C.skel; ctx.fill(); }
+function bubbleSize(ctx, s, size) { const padX = size * 0.9, padY = size * 0.72; return { w: measure(ctx, s, { size, weight: 500 }) + padX * 2, h: size + padY * 2, padX }; }
+// user bubble (right aligned, blue) or bot bubble (left, white). x = right edge for 'right', left edge for 'left'; y = top
+function bubble(ctx, s, x, y, o) {
+  const size = o.size || 26; const b = bubbleSize(ctx, s, size);
+  const bx = o.side === 'right' ? x - b.w : x;
+  if (o.side === 'right') {
+    ctx.save(); ctx.shadowColor = 'rgba(51,112,255,0.28)'; ctx.shadowBlur = 22; ctx.shadowOffsetY = 8;
+    rrect(ctx, bx, y, b.w, b.h, b.h / 2); ctx.fillStyle = lin2(ctx, bx, y, bx + b.w, y + b.h, '#3370FF', '#5E7BFF'); ctx.fill(); ctx.restore();
+    text(ctx, s, bx + b.padX, y + b.h / 2 + size * 0.36, { size, weight: 500, color: '#FFFFFF', g: o.g });
+  } else {
+    card(ctx, bx, y, b.w, b.h, b.h / 2, { blur: 18, oy: 6, shadow: 'rgba(31,35,41,0.08)' });
+    text(ctx, s, bx + b.padX, y + b.h / 2 + size * 0.36, { size, weight: 500, color: C.text, g: o.g });
+  }
+  return { x: bx, y, w: b.w, h: b.h };
+}
+function bezPt(P, t) {
+  const u = 1 - t;
+  return [u * u * u * P[0][0] + 3 * u * u * t * P[1][0] + 3 * u * t * t * P[2][0] + t * t * t * P[3][0],
+          u * u * u * P[0][1] + 3 * u * u * t * P[1][1] + 3 * u * t * t * P[2][1] + t * t * t * P[3][1]];
+}
+function glowDot(ctx, x, y, color, r) {
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r * 2.4);
+  g.addColorStop(0, hexA(color, 0.55)); g.addColorStop(1, hexA(color, 0));
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r * 2.4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x, y, r * 0.55, 0, Math.PI * 2); ctx.fillStyle = '#FFFFFF'; ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = color; ctx.stroke();
+}
+// animated connection: draws on with prog, flowing dashes, light pulses travelling along
+function flow(ctx, P, color, prog, f, o = {}) {
+  if (prog <= 0.001) return;
+  const N = 48, n = Math.max(2, Math.ceil(N * prog));
+  ctx.save(); ctx.lineCap = 'round';
+  ctx.beginPath();
+  for (let i = 0; i <= n; i++) { const p = bezPt(P, prog * i / n); i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]); }
+  ctx.strokeStyle = hexA(color, 0.18); ctx.lineWidth = (o.w || 3) + 3; ctx.stroke();
+  ctx.setLineDash([3, 13]); ctx.lineDashOffset = -f * (o.rev ? -1.4 : 1.4);
+  ctx.strokeStyle = hexA(color, 0.9); ctx.lineWidth = o.w || 3; ctx.stroke();
+  ctx.restore();
+  if (prog >= 0.999 && o.pulses !== 0) {
+    const k = o.pulses || 2;
+    for (let j = 0; j < k; j++) {
+      let t = ((f * (o.ps || 0.014)) + j / k + (o.ph || 0)) % 1; if (o.rev) t = 1 - t;
+      const p = bezPt(P, t);
+      const ea = Math.sin(Math.PI * t);
+      withAlpha(ctx, ea, () => glowDot(ctx, p[0], p[1], color, o.pr || 8));
+    }
+  }
+}
+function ring(ctx, x, y, r, a, w, color) {
+  if (a <= 0.001) return;
+  ctx.save(); ctx.globalAlpha *= a; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.strokeStyle = color || brandGrad(ctx, x - r, y - r, x + r, y + r); ctx.lineWidth = w; ctx.stroke(); ctx.restore();
+}
+// ---------- icons & devices ----------
+function feishuIcon(ctx, x, y, s) { // stylized app tile (not a trademark): rounded square + chat glyph
+  ctx.save();
+  ctx.shadowColor = 'rgba(51,112,255,0.35)'; ctx.shadowBlur = s * 0.4; ctx.shadowOffsetY = s * 0.12;
+  rrect(ctx, x - s / 2, y - s / 2, s, s, s * 0.26); ctx.fillStyle = lin2(ctx, x - s / 2, y - s / 2, x + s / 2, y + s / 2, C.blue, C.cyan); ctx.fill();
+  ctx.restore();
+  ctx.save(); ctx.fillStyle = '#FFFFFF';
+  const bw = s * 0.48, bh = s * 0.34;
+  rrect(ctx, x - bw / 2, y - bh / 2 - s * 0.04, bw, bh, s * 0.1); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(x - bw * 0.18, y + bh / 2 - s * 0.06); ctx.lineTo(x - bw * 0.3, y + bh / 2 + s * 0.12); ctx.lineTo(x + bw * 0.06, y + bh / 2 - s * 0.06); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = C.blue;
+  for (let i = -1; i <= 1; i++) { ctx.beginPath(); ctx.arc(x + i * s * 0.11, y - s * 0.04, s * 0.035, 0, Math.PI * 2); ctx.fill(); }
+  ctx.restore();
+}
+function miniHub(ctx, x, y, r, f) {
+  ctx.save();
+  ctx.shadowColor = 'rgba(123,97,255,0.4)'; ctx.shadowBlur = r * 0.8;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = brandGrad(ctx, x - r, y - r, x + r, y + r); ctx.fill();
+  ctx.restore();
+  muxGlyph(ctx, x, y, r * 0.95);
+}
+function muxGlyph(ctx, x, y, r) { // three inputs merging into one output
+  ctx.save(); ctx.strokeStyle = 'rgba(255,255,255,0.95)'; ctx.fillStyle = '#FFFFFF'; ctx.lineWidth = Math.max(1.5, r * 0.09); ctx.lineCap = 'round';
+  const lx = x - r * 0.45, rx = x + r * 0.42;
+  for (let i = -1; i <= 1; i++) {
+    const ly = y + i * r * 0.34;
+    ctx.beginPath(); ctx.moveTo(lx, ly); ctx.bezierCurveTo(x - r * 0.05, ly, x - r * 0.05, y, rx - r * 0.1, y); ctx.stroke();
+    ctx.beginPath(); ctx.arc(lx, ly, r * 0.09, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.beginPath(); ctx.arc(rx, y, r * 0.14, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+function sparkle(ctx, x, y, r, color) {
+  ctx.save(); ctx.fillStyle = color; ctx.beginPath();
+  ctx.moveTo(x, y - r); ctx.quadraticCurveTo(x + r * 0.15, y - r * 0.15, x + r, y); ctx.quadraticCurveTo(x + r * 0.15, y + r * 0.15, x, y + r);
+  ctx.quadraticCurveTo(x - r * 0.15, y + r * 0.15, x - r, y); ctx.quadraticCurveTo(x - r * 0.15, y - r * 0.15, x, y - r); ctx.fill(); ctx.restore();
+}
+function botAvatar(ctx, x, y, r, color) {
+  ctx.save(); ctx.shadowColor = hexA(color, 0.35); ctx.shadowBlur = 14; ctx.shadowOffsetY = 4;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = lin2(ctx, x - r, y - r, x + r, y + r, color, '#FFFFFF'); ctx.fill(); ctx.restore();
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = hexA(color, 0.9); ctx.fill();
+  sparkle(ctx, x, y, r * 0.55, '#FFFFFF');
+}
+function userAvatar(ctx, x, y, r, c1, c2) {
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = lin2(ctx, x - r, y - r, x + r, y + r, c1, c2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x, y - r * 0.18, r * 0.32, 0, Math.PI * 2); ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x, y + r * 0.5, r * 0.5, r * 0.3, 0, Math.PI, 0); ctx.fill();
+}
+function typingDots(ctx, x, y, f, color) {
+  for (let i = 0; i < 3; i++) {
+    const b = Math.sin(f * 0.25 - i * 0.8);
+    ctx.beginPath(); ctx.arc(x + i * 18, y - Math.max(0, b) * 6, 5, 0, Math.PI * 2);
+    ctx.fillStyle = hexA(color || C.violet, 0.45 + 0.4 * Math.max(0, b)); ctx.fill();
+  }
+}
+function outIcon(ctx, kind, x, y, s, color) { // 文档 / 表格 / 演示 / 自动化 glyphs (white on color)
+  ctx.save(); ctx.strokeStyle = '#FFFFFF'; ctx.fillStyle = '#FFFFFF'; ctx.lineWidth = Math.max(2, s * 0.09); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  if (kind === 'doc') { rrect(ctx, x - s * 0.3, y - s * 0.38, s * 0.6, s * 0.76, s * 0.08); ctx.stroke(); for (let i = 0; i < 3; i++) { ctx.beginPath(); ctx.moveTo(x - s * 0.16, y - s * 0.14 + i * s * 0.16); ctx.lineTo(x + s * (i === 2 ? 0.04 : 0.16), y - s * 0.14 + i * s * 0.16); ctx.stroke(); } }
+  else if (kind === 'sheet') { rrect(ctx, x - s * 0.36, y - s * 0.32, s * 0.72, s * 0.64, s * 0.08); ctx.stroke(); ctx.beginPath(); ctx.moveTo(x - s * 0.36, y - s * 0.08); ctx.lineTo(x + s * 0.36, y - s * 0.08); ctx.moveTo(x - s * 0.36, y + s * 0.12); ctx.lineTo(x + s * 0.36, y + s * 0.12); ctx.moveTo(x - s * 0.08, y - s * 0.32); ctx.lineTo(x - s * 0.08, y + s * 0.32); ctx.stroke(); }
+  else if (kind === 'slide') { rrect(ctx, x - s * 0.38, y - s * 0.3, s * 0.76, s * 0.5, s * 0.06); ctx.stroke(); ctx.beginPath(); ctx.moveTo(x, y + s * 0.2); ctx.lineTo(x, y + s * 0.36); ctx.moveTo(x - s * 0.14, y + s * 0.36); ctx.lineTo(x + s * 0.14, y + s * 0.36); ctx.stroke(); ctx.beginPath(); ctx.moveTo(x - s * 0.06, y - s * 0.14); ctx.lineTo(x + s * 0.1, y - s * 0.05); ctx.lineTo(x - s * 0.06, y + s * 0.04); ctx.closePath(); ctx.fill(); }
+  else if (kind === 'auto') { ctx.beginPath(); ctx.moveTo(x + s * 0.06, y - s * 0.4); ctx.lineTo(x - s * 0.2, y + s * 0.04); ctx.lineTo(x + s * 0.02, y + s * 0.04); ctx.lineTo(x - s * 0.06, y + s * 0.4); ctx.lineTo(x + s * 0.22, y - s * 0.06); ctx.lineTo(x, y - s * 0.06); ctx.closePath(); ctx.fill(); }
+  else if (kind === 'ai') { sparkle(ctx, x, y, s * 0.38, '#FFFFFF'); }
+  else if (kind === 'cli') { ctx.beginPath(); ctx.moveTo(x - s * 0.28, y - s * 0.18); ctx.lineTo(x - s * 0.06, y); ctx.lineTo(x - s * 0.28, y + s * 0.18); ctx.stroke(); ctx.beginPath(); ctx.moveTo(x + s * 0.02, y + s * 0.2); ctx.lineTo(x + s * 0.28, y + s * 0.2); ctx.stroke(); }
+  else if (kind === 'skill') { for (let i = 0; i < 4; i++) { const dx = (i % 2 ? 1 : -1) * s * 0.15, dy = (i < 2 ? -1 : 1) * s * 0.15; rrect(ctx, x + dx - s * 0.11, y + dy - s * 0.11, s * 0.22, s * 0.22, s * 0.06); ctx.fill(); } }
+  ctx.restore();
+}
+function iconTile(ctx, kind, x, y, s, color) {
+  ctx.save(); ctx.shadowColor = hexA(color, 0.4); ctx.shadowBlur = s * 0.5; ctx.shadowOffsetY = s * 0.12;
+  rrect(ctx, x - s / 2, y - s / 2, s, s, s * 0.3); ctx.fillStyle = lin2(ctx, x - s / 2, y - s / 2, x + s / 2, y + s / 2, color, hexA(color, 0.75)); ctx.fill(); ctx.restore();
+  outIcon(ctx, kind, x, y, s * 0.8, color);
+}
+// pill with icon tile + label; (x,y) = centre
+function pill(ctx, kind, label, x, y, color, o = {}) {
+  const size = o.size || 32, mono = !!o.mono;
+  const tw = measure(ctx, label, { size, weight: 700, mono });
+  const h = o.h || 84, tile = h - 24, w = tw + tile + 60;
+  card(ctx, x - w / 2, y - h / 2, w, h, h / 2, { shadow: hexA(color, 0.22), blur: 34, oy: 12 });
+  iconTile(ctx, kind, x - w / 2 + 12 + tile / 2, y, tile, color);
+  text(ctx, label, x - w / 2 + 12 + tile + 18, y + size * 0.36, { size, weight: 700, color: C.text, mono, g: o.g });
+  return w;
+}
+// Feishu-style chat window (light). returns body rect
+function feishuWindow(ctx, x, y, w, h, o = {}) {
+  card(ctx, x, y, w, h, 28, { shadow: 'rgba(51,112,255,0.18)', blur: 70, oy: 28 });
+  ctx.save(); rrect(ctx, x, y, w, h, 28); ctx.clip();
+  ctx.fillStyle = 'rgba(245,247,252,0.9)'; ctx.fillRect(x, y, w, 68);
+  ctx.fillStyle = 'rgba(31,35,41,0.06)'; ctx.fillRect(x, y + 68, w, 1);
+  if (o.sidebar) { ctx.fillStyle = 'rgba(51,112,255,0.04)'; ctx.fillRect(x, y + 69, 84, h - 69); for (let i = 0; i < 4; i++) { rrect(ctx, x + 22, y + 96 + i * 64, 40, 40, 12); ctx.fillStyle = i === 0 ? hexA(C.blue, 0.18) : 'rgba(31,35,41,0.06)'; ctx.fill(); } }
+  ctx.restore();
+  feishuIcon(ctx, x + 44, y + 34, 36);
+  text(ctx, '飞书', x + 74, y + 43, { size: 24, weight: 700, color: C.text, g: o.g });
+  // window dots right
+  for (let i = 0; i < 3; i++) { ctx.beginPath(); ctx.arc(x + w - 36 - i * 22, y + 34, 6, 0, Math.PI * 2); ctx.fillStyle = ['#FF6B9A', '#FFC53D', '#00C2FF'][i]; ctx.globalAlpha *= 0.7; ctx.fill(); ctx.globalAlpha /= 0.7; }
+}
+function phone(ctx, x, y, w, h) { // x,y top-left
+  ctx.save(); ctx.shadowColor = 'rgba(51,112,255,0.22)'; ctx.shadowBlur = 60; ctx.shadowOffsetY = 26;
+  rrect(ctx, x, y, w, h, 56); ctx.fillStyle = '#FFFFFF'; ctx.fill(); ctx.restore();
+  rrect(ctx, x, y, w, h, 56); ctx.strokeStyle = 'rgba(31,35,41,0.10)'; ctx.lineWidth = 2; ctx.stroke();
+  rrect(ctx, x + 12, y + 12, w - 24, h - 24, 46); ctx.fillStyle = '#F6F7FB'; ctx.fill();
+  rrect(ctx, x + w / 2 - 54, y + 26, 108, 30, 15); ctx.fillStyle = '#1F2329'; ctx.fill();
+}
+
+// ---------- BotMux hub (hero) ----------
+const HUBK = [
+  [166, 960, 640, 110], [390, 960, 640, 110], [416, 960, 620, 84], [700, 960, 620, 84],
+  [734, 960, 640, 130], [826, 960, 640, 130], [852, 960, 640, 178], [874, 960, 640, 140],
+  [948, 960, 640, 140], [982, 1180, 600, 46], [1088, 1180, 600, 46], [1116, 626, 428, 26], [1200, 626, 428, 26]
+];
+function hubState(f) {
+  if (f <= HUBK[0][0]) return { x: HUBK[0][1], y: HUBK[0][2], r: HUBK[0][3] };
+  for (let i = 0; i < HUBK.length - 1; i++) {
+    const a = HUBK[i], b = HUBK[i + 1];
+    if (f >= a[0] && f < b[0]) {
+      const t = (f - a[0]) / (b[0] - a[0]);
+      const e = easeInOut(t), s = springT(t * 1.6);
+      return { x: lerp(a[1], b[1], e), y: lerp(a[2], b[2], e), r: lerp(a[3], b[3], s) };
+    }
+  }
+  const z = HUBK[HUBK.length - 1]; return { x: z[1], y: z[2], r: z[3] };
+}
+function hubBump(f) {
+  let b = 0;
+  for (const s of [458, 552, 646, 1046]) { const t = (f - s) / 18; if (t > 0 && t < 1) b += Math.sin(Math.PI * t) * 0.14; }
+  return b;
+}
+function drawHub(ctx, f) {
+  const a = fade(f, 158, 12); if (a <= 0.001) return;
+  const st = hubState(f);
+  const r = st.r * (1 + 0.022 * Math.sin(f * 0.08) + hubBump(f)), x = st.x + Math.sin(f * 0.031) * 4, y = st.y + Math.sin(f * 0.043 + 1) * 5;
+  withAlpha(ctx, a, () => {
+    // aura
+    const g = ctx.createRadialGradient(x, y, r * 0.6, x, y, r * 2.8);
+    g.addColorStop(0, 'rgba(123,97,255,0.30)'); g.addColorStop(0.5, 'rgba(255,107,154,0.10)'); g.addColorStop(1, 'rgba(123,97,255,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r * 2.8, 0, Math.PI * 2); ctx.fill();
+    // orbit tracks
+    if (r > 40) {
+      ctx.save(); ctx.setLineDash([2, 10]); ctx.lineDashOffset = -f * 0.6; ctx.strokeStyle = 'rgba(123,97,255,0.35)'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(x, y, r * 1.45, 0, Math.PI * 2); ctx.stroke();
+      ctx.lineDashOffset = f * 0.4; ctx.strokeStyle = 'rgba(51,112,255,0.22)'; ctx.beginPath(); ctx.arc(x, y, r * 1.8, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    }
+    // orb
+    ctx.save(); ctx.shadowColor = 'rgba(123,97,255,0.5)'; ctx.shadowBlur = r * 0.7; ctx.shadowOffsetY = r * 0.12;
+    const ang = f * 0.012;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = brandGrad(ctx, x - Math.cos(ang) * r, y - Math.sin(ang) * r, x + Math.cos(ang) * r, y + Math.sin(ang) * r); ctx.fill();
+    ctx.restore();
+    // rotating conic rim
+    const cg = ctx.createConicGradient(f * 0.03, x, y);
+    cg.addColorStop(0, '#FFFFFF'); cg.addColorStop(0.25, 'rgba(0,194,255,0.9)'); cg.addColorStop(0.5, 'rgba(255,255,255,0.2)'); cg.addColorStop(0.75, 'rgba(255,197,61,0.9)'); cg.addColorStop(1, '#FFFFFF');
+    ctx.save(); ctx.beginPath(); ctx.arc(x, y, r * 0.96, 0, Math.PI * 2); ctx.strokeStyle = cg; ctx.lineWidth = Math.max(2, r * 0.06); ctx.globalAlpha *= 0.85; ctx.stroke(); ctx.restore();
+    // glass highlight
+    ctx.save(); ctx.beginPath(); ctx.ellipse(x - r * 0.28, y - r * 0.46, r * 0.5, r * 0.22, -0.4, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.28)'; ctx.fill(); ctx.restore();
+    if (r >= 60) {
+      muxGlyph(ctx, x, y - r * 0.22, r * 0.36);
+      text(ctx, 'BotMux', x, y + r * 0.36, { size: Math.round(r * 0.3), weight: 700, align: 'center', color: '#FFFFFF', g: 'hub' });
+    } else muxGlyph(ctx, x, y, r * 0.9);
+    // satellites (little bots orbiting = many AI capabilities gathered)
+    const sa = 1 - clamp((f - 1088) / 18);
+    if (r > 40 && sa > 0) {
+      const cols = [C.cyan, C.pink, C.yellow, C.blue];
+      for (let i = 0; i < 4; i++) {
+        const th = f * (0.018 + i * 0.004) + i * Math.PI / 2;
+        const rr = r * (i % 2 ? 1.8 : 1.45);
+        withAlpha(ctx, sa, () => { const px = x + Math.cos(th) * rr, py = y + Math.sin(th) * rr; ctx.save(); ctx.shadowColor = hexA(cols[i], 0.6); ctx.shadowBlur = 12; ctx.beginPath(); ctx.arc(px, py, Math.max(4, r * 0.075), 0, Math.PI * 2); ctx.fillStyle = cols[i]; ctx.fill(); ctx.restore(); });
+      }
+    }
+  });
+}
+
+// ---------- background & camera ----------
+const BLOBS = [
+  { c: '#3370FF', x: 260, y: 180, r: 680, a: 0.22, s: 0.0050, p: 0.0 },
+  { c: '#00C2FF', x: 1680, y: 200, r: 600, a: 0.20, s: 0.0042, p: 1.7 },
+  { c: '#7B61FF', x: 1520, y: 920, r: 680, a: 0.20, s: 0.0047, p: 3.1 },
+  { c: '#FF6B9A', x: 380, y: 960, r: 600, a: 0.16, s: 0.0055, p: 4.4 },
+  { c: '#FFC53D', x: 1000, y: 520, r: 520, a: 0.12, s: 0.0038, p: 2.2 }
+];
+function drawBackground(ctx, f, cam) {
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+  for (const b of BLOBS) {
+    const x = b.x + 160 * Math.sin(f * b.s + b.p) - cam.dx * 0.3, y = b.y + 100 * Math.cos(f * b.s * 1.3 + b.p) - cam.dy * 0.3;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, b.r);
+    g.addColorStop(0, hexA(b.c, b.a)); g.addColorStop(1, hexA(b.c, 0));
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+  // parallax dot grid
+  ctx.fillStyle = 'rgba(31,35,41,0.05)';
+  const ox = ((-cam.dx * 0.5 - f * 0.15) % 44 + 44) % 44, oy = ((-cam.dy * 0.5) % 44 + 44) % 44;
+  for (let x = ox; x < W; x += 44) for (let y = oy; y < H; y += 44) ctx.fillRect(x, y, 2, 2);
+}
+const CAMK = [[0, 0], [170, 0], [395, 0.035], [430, 0.01], [690, 0.045], [740, -0.015], [940, 0.02], [975, 0.0], [1090, 0.025], [1125, 0], [1200, 0.01]];
+function camera(f) {
+  let z = 0;
+  for (let i = 0; i < CAMK.length - 1; i++) { const a = CAMK[i], b = CAMK[i + 1]; if (f >= a[0] && f <= b[0]) { z = lerp(a[1], b[1], easeInOut((f - a[0]) / (b[0] - a[0]))); break; } }
+  return { s: 1 + z, dx: 10 * Math.sin(f * 0.006), dy: 6 * Math.sin(f * 0.0045 + 1) };
+}
+// ================= S1 0–175 : from chat =================
+const S1MSG = '帮我整理一下今天的会议。';
+function s1(ctx, f, layer) {
+  if (f >= 178 || layer !== 'front') return;
+  const pw = 420, ph = 820, pcx = 960, pcy = 560;
+  const pin = sp(f, 0, 22), pa = fade(f, 0, 12);
+  const push = easeInOut((f - 54) / 34);
+  const bs = bubbleSize(ctx, S1MSG, 24);
+  const bR = pw - 34, bT = 196, bcx = bR - bs.w / 2, bcy = bT + bs.h / 2;
+  const ax = pcx + (bcx - pw / 2), ay = pcy + (bcy - ph / 2);
+  const sc = (0.86 + 0.14 * pin) * (1 + 1.9 * push);
+  const phoneA = pa * (1 - clamp((f - 58) / 18));
+  withAlpha(ctx, phoneA, () => {
+    ctx.save();
+    ctx.translate(ax, ay + (1 - pin) * 100); ctx.rotate((1 - pin) * -0.07); ctx.scale(sc, sc); ctx.translate(-bcx, -bcy);
+    phone(ctx, 0, 0, pw, ph);
+    if (f < 56) {
+      feishuIcon(ctx, 52, 104, 34);
+      text(ctx, '飞书', 80, 113, { size: 24, weight: 700, color: C.text });
+      ctx.fillStyle = 'rgba(31,35,41,0.06)'; ctx.fillRect(24, 140, pw - 48, 1);
+      const bp = sp(f, 14, 16);
+      if (bp > 0) withAlpha(ctx, fade(f, 14, 6), () => at(ctx, bR, bcy, Math.max(0.01, bp), () => bubble(ctx, S1MSG, bR, bT, { side: 'right', size: 24 })));
+      const tp = sp(f, 30, 16);
+      if (tp > 0) withAlpha(ctx, fade(f, 30, 8), () => at(ctx, 60, 330, Math.max(0.01, tp), () => {
+        miniHub(ctx, 60, 330, 24, f);
+        card(ctx, 98, 306, 100, 48, 24, { blur: 14, oy: 4, shadow: 'rgba(31,35,41,0.08)' });
+        typingDots(ctx, 130, 331, f, C.violet);
+      }));
+      // skeleton history
+      withAlpha(ctx, fade(f, 6, 12), () => { for (let i = 0; i < 3; i++) { skelBar(ctx, 40, 420 + i * 70, [260, 200, 230][i], 44, 'rgba(31,35,41,0.05)'); } });
+    }
+    ctx.restore();
+  });
+  // bubble → full-screen → contracts into BotMux orb (match cut)
+  if (f >= 56) {
+    const m = easeInOut((f - 56) / 26), c = easeInOut((f - 150) / 20);
+    const r0 = [ax - bs.w / 2 * sc / (1 + 1.9 * push) , ay - bs.h / 2, bs.w, bs.h, bs.h / 2];
+    const big = [90, 90, W - 180, H - 180, 64];
+    const hub = [960 - 110, 640 - 110, 220, 220, 110];
+    const L = (A, B, t) => A.map((v, i) => lerp(v, B[i], t));
+    const R = L(L([ax - bs.w / 2, ay - bs.h / 2, bs.w, bs.h, bs.h / 2], big, m), hub, c);
+    const ra = 1 - clamp((f - 164) / 10);
+    withAlpha(ctx, ra, () => {
+      ctx.save(); ctx.shadowColor = 'rgba(51,112,255,0.35)'; ctx.shadowBlur = 60; ctx.shadowOffsetY = 20;
+      rrect(ctx, R[0], R[1], R[2], R[3], R[4]);
+      ctx.fillStyle = brandGrad(ctx, R[0], R[1], R[0] + R[2], R[1] + R[3]); ctx.fill(); ctx.restore();
+      // living sheen + soft orbs inside
+      ctx.save(); rrect(ctx, R[0], R[1], R[2], R[3], R[4]); ctx.clip();
+      const sx = lerp(-600, W + 600, ((f - 60) % 120) / 120);
+      const g = ctx.createLinearGradient(sx - 300, 0, sx + 300, 0);
+      g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(0.5, 'rgba(255,255,255,0.14)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+      for (let i = 0; i < 3; i++) { const ox = 960 + Math.cos(f * 0.02 + i * 2.1) * 600, oy = 540 + Math.sin(f * 0.026 + i * 2.1) * 260; const gg = ctx.createRadialGradient(ox, oy, 0, ox, oy, 380); gg.addColorStop(0, ['rgba(0,194,255,0.35)', 'rgba(255,107,154,0.30)', 'rgba(255,197,61,0.22)'][i]); gg.addColorStop(1, 'rgba(255,255,255,0)'); ctx.fillStyle = gg; ctx.fillRect(0, 0, W, H); }
+      ctx.restore();
+    });
+    const ta = 1 - clamp((f - 146) / 10);
+    withAlpha(ctx, ta, () => {
+      const lift = -clamp((f - 146) / 10) * 30;
+      kinetic(ctx, [{ s: '帮我' }, { s: '整理一下' }, { s: '今天的会议。' }], 960, 500 + lift, { size: 88, weight: 700, color: '#FFFFFF' }, f, 70, 5, 's1a');
+      kinetic(ctx, [{ s: '发一句话，' }, { s: '工作开始。' }], 960, 630 + lift, { size: 56, weight: 700, color: 'rgba(255,255,255,0.92)' }, f, 86, 7, 's1b');
+    });
+  }
+}
+
+// ================= S2 160–405 : 飞书 × BotMux × AI =================
+const WIN2 = [300, 300, 1320, 640];
+function s2(ctx, f, layer) {
+  if (f < 168 || f > 410) return;
+  const wa = fade(f, 170, 14) * out(f, 392, 14);
+  const ws = lerp(0.94, 1, sp(f, 170, 24)) + clamp((f - 392) / 14) * 0.04;
+  if (layer === 'back') {
+    withAlpha(ctx, wa, () => at(ctx, 960, 620, ws, () => {
+      const [x, y, w, h] = WIN2;
+      feishuWindow(ctx, x, y, w, h, { sidebar: false });
+      // left: 聊天
+      withAlpha(ctx, fade(f, 200, 12), () => text(ctx, '聊天', x + 44, y + 110, { size: 22, weight: 700, color: C.sub }));
+      const rows = [[C.pink, C.yellow], [C.cyan, C.blue], [C.yellow, C.pink]];
+      for (let i = 0; i < 3; i++) {
+        const p = sp(f, 206 + i * 8, 18), a = fade(f, 206 + i * 8, 10);
+        withAlpha(ctx, a, () => {
+          const ox = (1 - p) * -60, ry = y + 136 + i * 74;
+          userAvatar(ctx, x + 64 + ox, ry + 24, 22, rows[i][0], rows[i][1]);
+          if (i === 0) bubble(ctx, S1MSG, x + 98 + ox, ry, { side: 'left', size: 20 });
+          else { card(ctx, x + 98 + ox, ry, [220, 180][i - 1], 48, 24, { blur: 14, oy: 4, shadow: 'rgba(31,35,41,0.06)' }); skelBar(ctx, x + 118 + ox, ry + 18, [150, 110][i - 1], 12); }
+        });
+      }
+      // reply from BotMux back into chat
+      const rp = sp(f, 312, 18);
+      withAlpha(ctx, fade(f, 312, 10), () => {
+        const ry = y + 136 + 3 * 74 + 10, ox = (1 - rp) * 40;
+        miniHub(ctx, x + 64 + ox, ry + 26, 22, f);
+        card(ctx, x + 98 + ox, ry, 250, 54, 27, { blur: 18, oy: 6, shadow: 'rgba(123,97,255,0.18)' });
+        skelBar(ctx, x + 120 + ox, ry + 16, 150, 10, brandGrad(ctx, x + 120, 0, x + 270, 0)); skelBar(ctx, x + 120 + ox, ry + 32, 100, 8);
+      });
+      // right: AI
+      withAlpha(ctx, fade(f, 222, 12), () => text(ctx, 'AI', x + w - 330, y + 110, { size: 22, weight: 700, color: C.sub }));
+      const bots = [C.violet, C.cyan, C.pink];
+      for (let i = 0; i < 3; i++) {
+        const p = sp(f, 228 + i * 8, 18), a = fade(f, 228 + i * 8, 10);
+        withAlpha(ctx, a, () => {
+          const ox = (1 - p) * 60, ry = y + 160 + i * 84 + Math.sin(f * 0.06 + i) * 4;
+          card(ctx, x + w - 340 + ox, ry - 32, 280, 64, 32, { blur: 22, oy: 8, shadow: hexA(bots[i], 0.2) });
+          botAvatar(ctx, x + w - 308 + ox, ry, 22, bots[i]);
+          skelBar(ctx, x + w - 274 + ox, ry - 10, [150, 120, 170][i], 10, hexA(bots[i], 0.35)); skelBar(ctx, x + w - 274 + ox, ry + 6, [100, 140, 90][i], 8);
+        });
+      }
+      // flows: chat → BotMux → AI → BotMux → chat
+      const hb = { x: 960, y: 640 };
+      flow(ctx, [[x + 380, y + 160], [800, y + 160], [800, 610], [hb.x - 120, 630]], C.blue, easeOutCubic((f - 250) / 22), f, { pulses: 2, ps: 0.016 });
+      for (let i = 0; i < 3; i++) {
+        const ty = y + 160 + i * 84;
+        flow(ctx, [[hb.x + 120, 630], [1130, 630], [1150, ty], [x + w - 342, ty]], bots[i], easeOutCubic((f - 262 - i * 6) / 22), f, { pulses: 1, ps: 0.014, ph: i * 0.33 });
+      }
+      flow(ctx, [[hb.x - 110, 680], [820, 740], [760, y + 400], [x + 352, y + 400]], C.pink, easeOutCubic((f - 292) / 22), f, { pulses: 2, ps: 0.016, ph: 0.5 });
+    }));
+  }
+  if (layer === 'front') {
+    const ta = out(f, 392, 10);
+    withAlpha(ctx, ta, () => {
+      kinetic(ctx, [{ s: '飞书，' }, { s: '连接协作。' }, { s: 'BotMux，', grad: true, hl: true }, { s: '接入 AI。' }], 960, 205, { size: 60, weight: 700, color: C.text }, f, 192, 7, 's2t');
+      withAlpha(ctx, fade(f, 232, 16), () => text(ctx, '熟悉的飞书，接上能帮你做事的 AI。', 960, 266 + (1 - sp(f, 232, 18)) * 16, { size: 30, color: C.sub, align: 'center' }));
+    });
+  }
+}
+
+// ================= S3 400–700 : 一句话 → 成果 =================
+const BEATS = [
+  { s: 410, msg: '把会议记录整理成文档。', kind: 'doc', label: '文档', color: C.blue },
+  { s: 504, msg: '把这份数据做成图表。', kind: 'sheet', label: '图表', color: C.cyan },
+  { s: 598, msg: '帮我做一份汇报 PPT。', kind: 'slide', label: '演示', color: C.violet }
+];
+const CARD3 = [1166, 432, 480, 376];
+function s3(ctx, f, layer) {
+  if (f < 398 || f > 704) return;
+  const sa = fade(f, 402, 12) * out(f, 690, 10);
+  const hb = hubState(f);
+  if (layer === 'back') {
+    withAlpha(ctx, sa, () => {
+      const bi = f < 504 ? 0 : f < 598 ? 1 : 2, col = BEATS[bi].color;
+      flow(ctx, [[770, 620], [820, 556], [840, 684], [hb.x - hb.r - 6, 620]], col, easeOutCubic((f - 414) / 20), f, { pulses: 1, ps: 0.02 });
+      flow(ctx, [[hb.x + hb.r + 6, 620], [1090, 556], [1110, 684], [CARD3[0] - 6, 620]], col, easeOutCubic((f - 420) / 20), f, { pulses: 1, ps: 0.02, ph: 0.5 });
+    });
+    return;
+  }
+  withAlpha(ctx, sa, () => kinetic(ctx, [{ s: '从说出来，' }, { s: '到做出来。', grad: true, hl: true }], 960, 205, { size: 62, weight: 700, color: C.text }, f, 404, 8, 's3t'));
+  for (const B of BEATS) {
+    const t = f - B.s; if (t < 0 || t > 94) continue;
+    const ex = clamp((t - 82) / 10);
+    // request bubble (left)
+    const bp = sp(f, B.s, 18);
+    withAlpha(ctx, fade(f, B.s, 8) * (1 - ex), () => at(ctx, 760, 620, 0.7 + 0.3 * bp, () => {
+      const b = bubbleSize(ctx, B.msg, 32);
+      bubble(ctx, B.msg, 760 - (1 - bp) * 80 - ex * 60, 620 - b.h / 2, { side: 'right', size: 32 });
+    }));
+    // packet bubble → hub
+    if (t >= 20 && t < 42) { const p = bezPt([[770, 620], [820, 556], [840, 684], [hb.x - hb.r, 620]], easeInOut((t - 20) / 22)); glowDot(ctx, p[0], p[1], C.blue, 12); }
+    // hub shockwave
+    if (t >= 44 && t < 70) { const k = (t - 44) / 26; ring(ctx, hb.x, hb.y, hb.r * (1.1 + k * 1.3), (1 - k) * 0.6, 4); }
+    // output card
+    const cp = sp(f, B.s + 46, 22), ca = fade(f, B.s + 46, 10) * (1 - ex);
+    withAlpha(ctx, ca, () => at(ctx, CARD3[0], 620, 0.6 + 0.4 * cp, () => {
+      const [x, y, w, h] = CARD3; const ox = ex * 60;
+      card(ctx, x + ox, y, w, h, 30, { shadow: hexA(B.color, 0.25), blur: 50, oy: 20 });
+      iconTile(ctx, B.kind, x + ox + 50, y + 50, 44, B.color);
+      text(ctx, B.label, x + ox + 86, y + 61, { size: 28, weight: 700, color: C.text });
+      outputBody(ctx, B, t, f, x + ox, y, w, h, hb);
+    }));
+  }
+}
+function outputBody(ctx, B, t, f, x, y, w, h, hb) {
+  if (B.kind === 'doc') {
+    const rows = [[0.62, 'g'], [0.86], [0.74], [0.9], [0.58], [0.7]];
+    rows.forEach((r, i) => {
+      const k = easeInOut((t - 50 - i * 3) / 22);
+      const tx = x + 40, ty = y + 112 + i * 40, tw = (w - 80) * r[0];
+      const sx = x - 240 + hash(i + 3) * 200, sy = y + 40 + hash(i + 9) * 300, rot = (hash(i + 17) - 0.5) * 1.2 * (1 - k);
+      ctx.save(); ctx.translate(lerp(sx, tx, k) + tw / 2, lerp(sy, ty, k) + 7); ctx.rotate(rot);
+      skelBar(ctx, -tw / 2, -7, tw, i === 0 ? 18 : 14, i === 0 ? brandGrad(ctx, -tw / 2, 0, tw / 2, 0) : 'rgba(31,35,41,0.10)');
+      ctx.restore();
+    });
+    const ck = sp(f, B.s + 78, 14);
+    if (ck > 0) at(ctx, x + w - 52, y + 50, Math.max(0.01, ck), () => { ctx.beginPath(); ctx.arc(x + w - 52, y + 50, 20, 0, Math.PI * 2); ctx.fillStyle = brandGrad(ctx, x + w - 72, y + 30, x + w - 32, y + 70); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(x + w - 61, y + 50); ctx.lineTo(x + w - 54, y + 57); ctx.lineTo(x + w - 42, y + 43); ctx.stroke(); });
+  } else if (B.kind === 'sheet') {
+    const nums = [42, 68, 55, 91, 73], base = y + h - 62, maxH = 200, gap = 82, x0 = x + 76;
+    ctx.fillStyle = 'rgba(31,35,41,0.08)'; ctx.fillRect(x + 36, base, w - 72, 2);
+    nums.forEach((n, i) => {
+      const bx = x0 + i * gap, st = B.s + 48 + i * 6;
+      const p = sp(f, st + 8, 20), hgt = (n / 100) * maxH * Math.max(0, p);
+      rrect(ctx, bx - 24, base - hgt, 48, hgt, [12, 12, 4, 4]); ctx.fillStyle = lin2(ctx, 0, base, 0, base - maxH, C.blue, i === 3 ? C.pink : C.violet); ctx.fill();
+      // number jumps from hub to bar top
+      const k = easeOutCubic((f - st) / 14);
+      const nx = bx, ny = base - hgt - 16 - Math.sin(Math.PI * clamp((f - st) / 10)) * 26;
+      withAlpha(ctx, fade(f, st + 2, 6), () => text(ctx, String(n), nx, ny, { size: 24, weight: 700, align: 'center', color: C.text, mono: true }));
+      withAlpha(ctx, fade(f, st + 10, 8), () => text(ctx, 'Q' + (i + 1), bx, base + 32, { size: 18, align: 'center', color: C.sub }));
+    });
+  } else {
+    for (let i = 0; i < 4; i++) {
+      const st = B.s + 50 + i * 5, p = sp(f, st, 20), a = fade(f, st, 6);
+      const tx = x + 120 + i * 92, ty = y + 200 + (i % 2) * 34, rot = (i - 1.5) * 0.07;
+      const px = lerp(hb.x + hb.r, tx, clamp(p, 0, 1.2)), py = lerp(620, ty, clamp(p, 0, 1.2));
+      withAlpha(ctx, a, () => {
+        ctx.save(); ctx.translate(px, py); ctx.rotate(rot * p); ctx.scale(0.5 + 0.5 * p, 0.5 + 0.5 * p);
+        card(ctx, -85, -60, 170, 120, 14, { shadow: hexA([C.blue, C.cyan, C.violet, C.pink][i], 0.25), blur: 24, oy: 8 });
+        rrect(ctx, -85, -60, 170, 30, [14, 14, 0, 0]); ctx.fillStyle = hexA([C.blue, C.cyan, C.violet, C.pink][i], 0.85); ctx.fill();
+        text(ctx, 'P' + (i + 1), -72, -38, { size: 18, weight: 700, color: '#FFFFFF', g: 'p' + i });
+        skelBar(ctx, -68, 0, 110, 10); skelBar(ctx, -68, 20, 80, 10);
+        ctx.restore();
+      });
+    }
+  }
+}
+// ================= S4 700–958 : capability network → converge → burst (HERO) =================
+const NODES = [
+  { s: 'AI 底座', kind: 'ai', color: C.violet, base: -2.55 },
+  { s: 'lark-cli', kind: 'cli', color: C.blue, base: -0.6, mono: true },
+  { s: '各类 Skills', kind: 'skill', color: C.pink, base: 1.57 }
+];
+const OUTS = [
+  { s: '文档', kind: 'doc', color: C.blue, x: 560, y: 470 },
+  { s: '表格', kind: 'sheet', color: C.cyan, x: 1360, y: 470 },
+  { s: '演示', kind: 'slide', color: C.violet, x: 560, y: 812 },
+  { s: '自动化', kind: 'auto', color: C.pink, x: 1360, y: 812 }
+];
+function nodeState(i, f) {
+  const N = NODES[i];
+  const conv = easeInCubic((f - 826) / 30), k = 1 - conv;
+  const th = N.base + (f - 700) * 0.006 + conv * 2.4;
+  return { x: 960 + 480 * k * Math.cos(th), y: 640 + 205 * k * Math.sin(th), k };
+}
+function s4(ctx, f, layer) {
+  if (f < 696 || f > 962) return;
+  const sa = fade(f, 700, 14) * out(f, 946, 12);
+  const hb = hubState(f);
+  if (layer === 'back') {
+    withAlpha(ctx, sa * 0.55 * sp(f, 704, 30), () => at(ctx, 960, 620, lerp(1.1, 1, sp(f, 704, 30)), () => feishuWindow(ctx, 560, 330, 800, 580, {})));
+    withAlpha(ctx, sa, () => {
+      NODES.forEach((N, i) => {
+        const st = nodeState(i, f); if (st.k < 0.15) return;
+        const p = easeOutCubic((f - 748 - i * 10) / 18);
+        withAlpha(ctx, clamp(st.k / 0.4), () => flow(ctx, [[st.x, st.y], [lerp(st.x, hb.x, 0.4), st.y], [hb.x, lerp(st.y, hb.y, 0.5)], [hb.x, hb.y]], N.color, p, f, { pulses: 1, ps: 0.022, ph: i * 0.3, rev: false }));
+      });
+      for (let j = 0; j < 3; j++) { const k = (f - 852 - j * 6) / 32; if (k > 0 && k < 1) ring(ctx, hb.x, hb.y, hb.r * (1.1 + k * 2.6), (1 - k) * 0.7, 6 - j); }
+      OUTS.forEach((O, i) => {
+        const p = easeOutCubic((f - 884 - i * 4) / 18);
+        flow(ctx, [[hb.x, hb.y], [hb.x, lerp(hb.y, O.y, 0.6)], [lerp(hb.x, O.x, 0.5), O.y], [O.x, O.y]], O.color, p, f, { pulses: 1, ps: 0.02, ph: i * 0.25, w: 2.5 });
+      });
+    });
+    return;
+  }
+  withAlpha(ctx, sa, () => {
+    kinetic(ctx, [{ s: '接上工具，' }, { s: '让 AI 动手。', grad: true, hl: true }], 960, 205, { size: 62, weight: 700, color: C.text }, f, 712, 8, 's4t');
+    withAlpha(ctx, fade(f, 738, 16), () => text(ctx, '连接飞书工具，搭配不同技能，把想法推进成成果。', 960, 266 + (1 - sp(f, 738, 18)) * 16, { size: 30, color: C.sub, align: 'center' }));
+    NODES.forEach((N, i) => {
+      const st = nodeState(i, f); const p = sp(f, 738 + i * 10, 22);
+      const a = fade(f, 738 + i * 10, 10) * clamp((st.k - 0.5) / 0.3);
+      withAlpha(ctx, a, () => at(ctx, st.x, st.y, Math.max(0.01, p) * (0.5 + 0.5 * st.k), () => pill(ctx, N.kind, N.s, st.x, st.y + Math.sin(f * 0.05 + i * 2) * 5, N.color, { size: 30, mono: N.mono, h: 76 })));
+    });
+    OUTS.forEach((O, i) => {
+      const st = 860 + i * 5, p = sp(f, st, 26);
+      const x = lerp(hb.x, O.x, p), y = lerp(hb.y, O.y, p) + Math.sin(f * 0.05 + i * 1.7) * 6;
+      const a = clamp((p - 0.45) / 0.3);
+      withAlpha(ctx, a, () => at(ctx, x, y, 0.4 + 0.6 * Math.min(1.1, p), () => pill(ctx, O.kind, O.s, x, y, O.color, { size: 34, h: 88 })));
+    });
+  });
+}
+
+// ================= S5 958–1096 : 换个地方，事情接着办 =================
+const PC = [170, 300, 920, 600], PH = [1290, 268, 340, 700];
+function s5(ctx, f, layer) {
+  if (f < 956 || f > 1114) return;
+  const conv = easeInOut((f - 1088) / 16);
+  const tA = fade(f, 958, 12);
+  const hb = hubState(f);
+  if (layer === 'back') {
+    // PC
+    const pp = sp(f, 962, 26);
+    withAlpha(ctx, fade(f, 962, 12) * clamp(1 - conv * 2.4), () => at(ctx, lerp(PC[0] + PC[2] / 2, 960, conv), 600, lerp(1, 0.6, conv), () => {
+      ctx.save(); ctx.translate((1 - pp) * -110 + conv * (960 - (PC[0] + PC[2] / 2)), 0);
+      const [x, y, w, h] = PC;
+      feishuWindow(ctx, x, y, w, h, { sidebar: true });
+      const m1 = sp(f, 984, 16);
+      withAlpha(ctx, fade(f, 984, 8), () => at(ctx, 1050, 430, Math.max(0.01, m1), () => bubble(ctx, '第二页再精简一点。', 1050, 400, { side: 'right', size: 26 })));
+      withAlpha(ctx, fade(f, 996, 8) * out(f, 1040, 8), () => { miniHub(ctx, 310, 520, 22, f); card(ctx, 344, 496, 100, 48, 24, { blur: 14, oy: 4, shadow: 'rgba(31,35,41,0.08)' }); typingDots(ctx, 376, 521, f, C.violet); });
+      const m2 = sp(f, 1040, 16);
+      withAlpha(ctx, fade(f, 1040, 8), () => at(ctx, 1050, 500, Math.max(0.01, m2), () => bubble(ctx, '好了，发我看看。', 1050, 470, { side: 'right', size: 26 })));
+      const rp = sp(f, 1050, 22);
+      withAlpha(ctx, fade(f, 1050, 10), () => at(ctx, 334, 690, 0.7 + 0.3 * rp, () => {
+        miniHub(ctx, 310, 600, 22, f);
+        card(ctx, 344, 566, 600, 270, 26, { shadow: 'rgba(123,97,255,0.22)', blur: 40, oy: 14 });
+        text(ctx, '结果', 376, 612, { size: 28, weight: 700, grad: true });
+        for (let i = 0; i < 3; i++) {
+          const sx = 376 + i * 186, k = sp(f, 1058 + i * 4, 18);
+          withAlpha(ctx, fade(f, 1058 + i * 4, 8), () => at(ctx, sx + 80, 720, Math.max(0.01, k), () => {
+            card(ctx, sx, 646, 166, 152, 16, { shadow: hexA([C.blue, C.violet, C.pink][i], 0.2), blur: 20, oy: 8 });
+            rrect(ctx, sx, 646, 166, 34, [16, 16, 0, 0]); ctx.fillStyle = hexA([C.blue, C.violet, C.pink][i], 0.85); ctx.fill();
+            text(ctx, 'P' + (i + 1), sx + 14, 670, { size: 18, weight: 700, color: '#FFFFFF' });
+            skelBar(ctx, sx + 16, 704, i === 1 ? 70 : 120, 12, i === 1 ? brandGrad(ctx, sx + 16, 0, sx + 86, 0) : C.skel); skelBar(ctx, sx + 16, 728, 90, 12);
+          }));
+        }
+      }));
+      ctx.restore();
+    }));
+    // phone
+    const php = sp(f, 1002, 26);
+    withAlpha(ctx, fade(f, 1002, 12) * clamp(1 - conv * 2.4), () => at(ctx, lerp(PH[0] + PH[2] / 2, 960, conv), 600, lerp(1, 0.6, conv), () => {
+      ctx.save(); ctx.translate((1 - php) * 240 + conv * (960 - (PH[0] + PH[2] / 2)), Math.sin(f * 0.05) * 4);
+      const [x, y, w, h] = PH;
+      phone(ctx, x, y, w, h);
+      feishuIcon(ctx, x + 48, y + 100, 30);
+      text(ctx, '飞书', x + 72, y + 108, { size: 20, weight: 700, color: C.text });
+      bubble(ctx, '第二页再精简一点。', x + w - 24, y + 150, { side: 'right', size: 20 });
+      const m2 = sp(f, 1022, 16);
+      withAlpha(ctx, fade(f, 1022, 8), () => at(ctx, x + w - 24, y + 236, Math.max(0.01, m2), () => bubble(ctx, '好了，发我看看。', x + w - 24, y + 214, { side: 'right', size: 20 })));
+      const rp = sp(f, 1062, 20);
+      withAlpha(ctx, fade(f, 1062, 8), () => at(ctx, x + 40, y + 340, Math.max(0.01, rp), () => {
+        miniHub(ctx, x + 40, y + 310, 16, f);
+        card(ctx, x + 64, y + 290, 240, 130, 18, { shadow: 'rgba(123,97,255,0.2)', blur: 24, oy: 8 });
+        text(ctx, '结果', x + 84, y + 322, { size: 18, weight: 700, grad: true });
+        for (let i = 0; i < 3; i++) { rrect(ctx, x + 84 + i * 70, y + 340, 60, 62, 8); ctx.fillStyle = hexA([C.blue, C.violet, C.pink][i], 0.18); ctx.fill(); }
+      }));
+      ctx.restore();
+    }));
+    // sync flows through the BotMux badge
+    withAlpha(ctx, fade(f, 1008, 12) * (1 - conv), () => {
+      flow(ctx, [[1090, 520], [1130, 520], [1140, 600], [hb.x - hb.r, 600]], C.blue, easeOutCubic((f - 1008) / 16), f, { pulses: 1, ps: 0.02, rev: true });
+      flow(ctx, [[hb.x + hb.r, 600], [1240, 600], [1250, 520], [1290, 520]], C.violet, easeOutCubic((f - 1012) / 16), f, { pulses: 1, ps: 0.02, rev: true, ph: 0.5 });
+      if (f >= 1026 && f < 1044) { const k = easeInOut((f - 1026) / 18); const P = k < 0.5 ? bezPt([[1290, 520], [1250, 520], [1240, 600], [hb.x + hb.r, 600]], k * 2) : bezPt([[hb.x - hb.r, 600], [1140, 600], [1130, 520], [1090, 520]], k * 2 - 1); glowDot(ctx, P[0], P[1], C.pink, 12); }
+    });
+    return;
+  }
+  withAlpha(ctx, tA * out(f, 1086, 10), () => kinetic(ctx, [{ s: '换个地方，' }, { s: '事情接着办。', grad: true, hl: true }], 960, 205, { size: 62, weight: 700, color: C.text }, f, 966, 8, 's5t'));
+}
+
+// ================= S6 1092–1199 : close =================
+function s6(ctx, f, layer) {
+  if (f < 1090) return;
+  const wp = sp(f, 1092, 26), wa = fade(f, 1092, 12);
+  if (layer === 'back') {
+    withAlpha(ctx, wa, () => at(ctx, 960, 465, lerp(0.85, 1, wp), () => {
+      feishuWindow(ctx, 560, 230, 800, 470, {});
+      withAlpha(ctx, fade(f, 1108, 8), () => bubble(ctx, S1MSG, 1320, 320, { side: 'right', size: 24 }));
+      const rp = sp(f, 1118, 18);
+      withAlpha(ctx, fade(f, 1118, 8), () => at(ctx, 660, 428, Math.max(0.01, rp), () => {
+        card(ctx, 664, 396, 380, 64, 32, { shadow: 'rgba(123,97,255,0.2)', blur: 24, oy: 8 });
+        skelBar(ctx, 690, 414, 200, 12, brandGrad(ctx, 690, 0, 890, 0)); skelBar(ctx, 690, 434, 140, 10);
+        ctx.beginPath(); ctx.arc(1012, 428, 14, 0, Math.PI * 2); ctx.fillStyle = brandGrad(ctx, 998, 414, 1026, 442); ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(1005, 428); ctx.lineTo(1010, 433); ctx.lineTo(1019, 423); ctx.stroke();
+      }));
+      card(ctx, 600, 612, 720, 60, 30, { shadow: 'rgba(31,35,41,0.06)', blur: 14, oy: 4 });
+      if (Math.floor(f / 15) % 2 === 0) { ctx.fillStyle = brandGrad(ctx, 0, 626, 0, 658); ctx.fillRect(632, 627, 3, 30); }
+      rrect(ctx, 1262, 620, 44, 44, 22); ctx.fillStyle = brandGrad(ctx, 1262, 620, 1306, 664); ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(1284, 652); ctx.lineTo(1284, 632); ctx.moveTo(1276, 640); ctx.lineTo(1284, 632); ctx.lineTo(1292, 640); ctx.stroke();
+    }));
+    return;
+  }
+  kinetic(ctx, [{ s: '像聊天一样，' }, { s: '把工作办好。', grad: true, hl: true }], 960, 830, { size: 70, weight: 700, color: C.text }, f, 1110, 8, 's6t');
+  withAlpha(ctx, fade(f, 1126, 14), () => text(ctx, 'BotMux × 飞书 × AI', 960, 922 + (1 - sp(f, 1126, 18)) * 18, { size: 38, weight: 700, align: 'center', grad: true }));
+}
+
+// ================= frame assembly =================
+const SCENES = [s1, s2, s3, s4, s5, s6];
+function renderFrame(ctx, frame) {
+  const f = Math.max(0, Math.min(TOTAL - 1, Math.round(frame)));
+  TEXT_LOG = [];
+  ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1;
+  const cam = camera(f);
+  drawBackground(ctx, f, cam);
+  ctx.translate(W / 2 + cam.dx, H / 2 + cam.dy); ctx.scale(cam.s, cam.s); ctx.translate(-W / 2, -H / 2);
+  for (const s of SCENES) s(ctx, f, 'back');
+  drawHub(ctx, f);
+  for (const s of SCENES) s(ctx, f, 'front');
+  ctx.restore();
+  if (f >= TOTAL - 8) {
+    const a = clamp((f - (TOTAL - 9)) / 8);
+    ctx.save(); ctx.globalAlpha = a; ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H); ctx.restore();
+    TEXT_LOG.forEach(t => { t.alpha = +(t.alpha * (1 - a)).toFixed(3); });
+  }
+}
+const canvas = document.getElementById('c');
+const ctx2d = canvas.getContext('2d');
+window.TOTAL = TOTAL;
+window.render = (frame) => { renderFrame(ctx2d, frame); return TEXT_LOG.filter(t => t.alpha > 0.02); };
+window.FONT_SPECS = [`400 36px "Noto Sans CJK SC"`, `700 64px "Noto Sans CJK SC"`, `400 28px "JetBrains Mono"`, `700 28px "JetBrains Mono"`];
+const q = new URLSearchParams(location.search);
+renderFrame(ctx2d, q.has('f') ? +q.get('f') : 0);
+</script>
+</body>
+</html>
