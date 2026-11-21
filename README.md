@@ -6,11 +6,12 @@
 
 ## Skills 目录
 
-| 类别 | Skill | 能做什么 | 交付物 | 飞书账号 |
+| 类别 | Skill | 能做什么 | 交付物 | 账号 / 依赖 |
 |---|---|---|---|---|
-| 视觉表达 | [灵绘出图 · image-linghui](skills/image-linghui/SKILL.md) | 信息图、海报、文档总结图、架构图、流程图，支持参考图重绘和换风格 | 本地 PNG + SVG 源文件 | 不需要 |
-| 视觉表达 | [飞书灵绘 · feishu-linghui](skills/feishu-linghui/SKILL.md) | 飞书原生画板、局部改字、加行，以及保留文档评论的操作指引 | 飞书文档内可编辑画板 + 预览图 | 需要登录及编辑权限 |
-| 动效视频 | [Canvas 动效短片 · canvas-motion-video](skills/canvas-motion-video/SKILL.md) | 15–60 秒产品宣传或技术讲解短片，文字清晰、可复现、可反复改版 | 本地 MP4 + HTML 源文件 | 不需要 |
+| 视觉表达 | [灵绘出图 · image-linghui](skills/image-linghui/SKILL.md) | 信息图、海报、文档总结图、架构图、流程图，支持参考图重绘和换风格 | 本地 PNG + SVG 源文件 | 免账号，需 SVG 渲染工具和中文字体 |
+| 视觉表达 | [飞书灵绘 · feishu-linghui](skills/feishu-linghui/SKILL.md) | 飞书原生画板、局部改字、加行，以及保留文档评论的操作指引 | 飞书文档内可编辑画板 + 预览图 | 已登录的 `lark-cli`、文档编辑权限、Python 3、Node.js/npx |
+| 动效视频 | [Canvas 动效短片 · canvas-motion-video](skills/canvas-motion-video/SKILL.md) | 15–60 秒产品宣传或技术讲解短片，文字清晰、可复现、可反复改版 | 本地 MP4 + HTML 源文件 | 免账号，工具依赖见下方安装说明 |
+| 工作流协作 | [Codex 委派协作 · codex-worker](skills/codex-worker/SKILL.md) | 把代码修改、命令执行、排障和构建测试委派给 Codex，续接原会话返工 | 经主 Agent 验收的改动与验证结果 | 已安装并登录的 Codex CLI，脚本需 Python 3 |
 
 两种画图方式各有 36 套配色与版式，按最终交付需求选择。后续新增能力直接加入目录，无需另建仓库。
 
@@ -47,10 +48,9 @@ git clone https://github.com/Minelyf/Minelyf-Skills.git
 cd Minelyf-Skills
 ```
 
-按需选择 `skills/image-linghui`、`skills/feishu-linghui` 或 `skills/canvas-motion-video`，也可同时使用。
+按需选择下方对应的目录。每个 skill 可独立安装，也可同时使用。
 
-下面以 Codex 的默认目录为安装示例：
-
+以下示例将出图、飞书画板和动效短片 skill 安装到 Codex 的用户 skills 目录。
 
 ```bash
 mkdir -p ~/.codex/skills
@@ -61,10 +61,18 @@ cp -R skills/canvas-motion-video ~/.codex/skills/
 
 Codex 用户如果自定义了 `CODEX_HOME`，请复制到该目录的 `skills/` 下；其他工具使用各自的加载目录。已有同名目录时先备份再更新。旧版 `feishu-board`、`beautiful-image-diagram`、`beautiful-feishu-whiteboard` 与这里的能力重叠，建议只启用所选版本，避免重复匹配。
 
+要把 Codex 委派协作安装到 `~/.agents/skills/`，运行以下命令。
+
+```bash
+mkdir -p ~/.agents/skills
+cp -R skills/codex-worker ~/.agents/skills/
+```
+
 - 灵绘出图：需要可用的 SVG → PNG 渲染工具（例如 CairoSVG、resvg 或浏览器），以及中文字体；Python 示例需要 Python 3。
 - 飞书灵绘：需要 Python 3、Node.js/npx 和已登录的 `lark-cli`；SVG 转换工具由 npx 按脚本指定的版本范围下载。
 - Canvas 动效短片：需要 Node.js、Playwright（Chromium）、ffmpeg、Python 3 与 numpy，以及中文字体（如 `fonts-noto-cjk`）。把构建脚本放到 `index.html` 同目录或它下面的 `scripts/`，把 `audio/` 放到 `index.html` 同级，再执行 `build.sh`。
-- 安装本身不配置账号或导入凭据；飞书登录由使用者在本机完成。
+- Codex 委派协作需要在本机安装并登录 Codex CLI。会话管理脚本仅使用 Python 3 标准库，也可直接调用 CLI。
+- 飞书与 Codex 的登录由使用者在本机完成。
 
 ## 风格预览
 
@@ -86,6 +94,7 @@ Minelyf-Skills/
     ├── image-linghui/         # 灵绘出图
     ├── feishu-linghui/        # 飞书灵绘
     ├── canvas-motion-video/   # Canvas 动效短片
+    ├── codex-worker/         # Codex 委派协作，含派单模板和 Python 3 会话脚本
     └── <next-skill>/          # 后续独立能力
 ```
 

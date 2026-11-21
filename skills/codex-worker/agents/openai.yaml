@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex 委派协作"
+  short_description: "将代码修改、构建测试和排障委派给 Codex，续接同一会话完成返工与验收"
+  default_prompt: "使用 $codex-worker，先明确实现约束和验收标准，再委派 Codex 落地并独立验收。"
